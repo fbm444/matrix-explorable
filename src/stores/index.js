@@ -106,3 +106,30 @@ export const resetViewToggle = writable(true);
 
 export const expandPlayground = writable(false);
 if (get(debug)) expandPlayground.set(true);
+
+// Determinant chapter
+// Live determinant of the currently displayed transform (set by Arcade)
+export const detValue = writable(1);
+// Live 2x2 entries [a, b, c, d] of the displayed transform (set by Arcade)
+export const detMatrixEntries = writable([1, 0, 0, 1]);
+// Which matrix column is hovered in MatrixInput: null | "x" | "y"
+export const highlightedBasis = writable(null);
+// Clicked preset from the article's "Select transformation" list: { key, m, n }
+export const detPresetRequest = writable(null);
+// True while the article's determinant "Try it" block has been reached:
+// the readout on the graph then shows the reader's own editable matrix
+export const detTryActive = writable(false);
+// True while the "The determinant and invertibility" section owns the canvas:
+// scrolling drives the transformation, so the readout is not editable
+export const invNarrative = writable(false);
+// The two tracked vectors a collapse beat is following: the shaded area on
+// the canvas is the one they span, and the readout multiplies them instead
+// of î and ĵ. { vectors: [[x1, y1], [x2, y2]], colors: [c1, c2],
+// resultColors: [c1, c2] (where they land), labels: opacity of the readout's
+// î ĵ column labels }, or null while î and ĵ themselves are on screen.
+export const invPair = writable(null);
+
+// The brief volume chapter uses the same canvas, with a 3×3 readout.
+export const det3dActive = writable(false);
+export const det3dMatrix = writable([1, 0, 0, 0, 1, 0, 0, 0, 1]);
+export const det3dPresetRequest = writable(null);

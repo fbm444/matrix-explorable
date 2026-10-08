@@ -4,7 +4,8 @@
 		endMatrix,
 		show3d,
 		vectorCoordsInput,
-		inputVectorToggled
+		inputVectorToggled,
+		highlightedBasis
 	} from "$stores";
 	import { Matrix } from "ml-matrix";
 	import { colorVector } from "$data/variables";
@@ -20,6 +21,21 @@
 	const indices2d = [0, 1, 4, 5];
 
 	const colors = ["p", "s", "a"];
+
+	// Geometric role of each 2x2 entry, in display order a, b, c, d
+	const entryAnnotations = [
+		"x-component of where î lands — stretches or compresses along x",
+		"x-component of where ĵ lands — tilts ĵ left or right (shear)",
+		"y-component of where î lands — tilts î up or down",
+		"y-component of where ĵ lands — stretches or compresses along y"
+	];
+
+	function highlightColumn(i) {
+		$highlightedBasis = i % 2 === 0 ? "x" : "y";
+	}
+	function clearHighlight() {
+		$highlightedBasis = null;
+	}
 
 	$: dims = $show3d ? 3 : 2;
 
@@ -84,7 +100,15 @@
 			>
 				{#each indices2d as idx, i (i)}
 					{@const textColor = colors[i % 2]}
-					<div>
+					<!-- svelte-ignore a11y-no-static-element-interactions -->
+					<div
+						class="tooltip tooltip-right tooltip-info"
+						data-tip={entryAnnotations[i]}
+						on:mouseenter={() => highlightColumn(i)}
+						on:mouseleave={clearHighlight}
+						on:focusin={() => highlightColumn(i)}
+						on:focusout={clearHighlight}
+					>
 						<NumberSpinner
 							bind:value={$endMatrix[idx]}
 							step={0.1}

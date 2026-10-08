@@ -1,6 +1,7 @@
 <script>
 	import Threlte from "$components/matrix/Threlte.svelte";
 	import MatrixInput from "$components/matrix/MatrixInput.svelte";
+	import DetReadout from "$components/matrix/DetReadout.svelte";
 	import ScrubberInput from "$components/matrix/ScrubberInput.svelte";
 	import Article from "./matrix/Article.svelte";
 	import Title from "./matrix/Title.svelte";
@@ -74,6 +75,8 @@
 		<MatrixInput />
 	</div>
 </div>
+
+<DetReadout />
 
 <!-- ScrollTrigger progress bar -->
 <!-- TODO: Shift to place near the canvas instead? -->

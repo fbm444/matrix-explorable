@@ -16,11 +16,17 @@
 	export let scalarAlign = "center";
 	export let visible = true;
 	export let dim3 = false;
+	export let width = 3;
+	export let opacity = 1;
+	// `end: false` draws a plain segment with no arrowhead
+	export let end = true;
+	export let stroke = "solid";
 
 	$: [x1, y1, z1, x2, y2, z2] = coords;
 
 	const vectorProps = {
-		end: true,
+		end,
+		stroke,
 		width: 3,
 		// zBias: 10_000,
 		zBias: 1_000,
@@ -45,6 +51,9 @@
 
 	$: data.set("data", coords);
 	$: vector.set("visible", visible);
+	$: vector.set("width", width);
+	$: vector.set("color", color);
+	$: vector.set("opacity", opacity);
 
 	// const alignOpts = {
 	// 	center: "translate-x-0",

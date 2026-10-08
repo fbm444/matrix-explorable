@@ -85,6 +85,146 @@ export const colorNf = "hsl(230, 15%, 23%)";
 export const colorIn = "hsl(191, 97%, 77%)"
 
 
+// Determinant chapter: signed-area colors (dracula green / red, grey-blue at zero)
+export const colorArea = "#50fa7b";
+export const colorAreaNeg = "#ff5555";
+export const colorAreaZero = "#6272a4";
+// Basis vector whose matrix entry is being hovered (dracula yellow)
+export const colorHighlight = "#f1fa8c";
+
+// Determinant chapter: preset transformations, as 2x2 row-major [a, b, c, d]
+export const detPresets = [
+	{ key: "identity", label: "Identity", m: [1, 0, 0, 1], det: 1 },
+	{ key: "stretch", label: "Stretch", m: [2, 0, 0, 1], det: 2 },
+	{ key: "compress", label: "Compress", m: [1, 0, 0, 0.5], det: 0.5 },
+	{ key: "shear", label: "Shear", m: [1, 1, 0, 1], det: 1 },
+	{ key: "rotate", label: "Rotate", m: [0, -1, 1, 0], det: 1 },
+	{ key: "reflect", label: "Reflect", m: [1, 0, 0, -1], det: -1 }
+];
+
+// "Try it out" walk-through: one transformation type per scroll beat
+// (st-try-1..5), as 2x2 row-major [a, b, c, d]. `rotate` turns through the
+// angle instead of tweening the entries, so the grid doesn't shrink mid-turn.
+export const tryBeats = [
+	{ key: "stretch", m: [2, 0, 0, 1] },
+	{ key: "reflect", m: [-1, 0, 0, 1] },
+	{ key: "shear", m: [1, 1, 0, 1] },
+	{ key: "rotate", m: [0, -1, 1, 0], rotate: true },
+	{ key: "flatten", m: [1, 0, 0, 0] }
+];
+
+// "The determinant and invertibility" (st-inv-1..8): the vectors followed through
+// each transformation, as [x, y] starting points, and the 2x2 row-major
+// matrix that moves them.
+// - collapse: play the matrix; every tracked vector lands on one point
+// - question: the same, then the starting points vanish and come back as
+//   candidates for "where did this come from?"
+// - hold: keep the previous beat's matrix; `more` adds further candidates
+//   and `fiber` is the line of every starting point with the same landing
+// - roundTrip: play the matrix, then play it backwards
+// `label` moves the landing point's coordinates clear of the other marks
+// The first two `vectors` span the shaded area and fill the readout's
+// equation; their order keeps that area positive before the matrix plays
+export const invBeats = [
+	{
+		key: "collapse-x",
+		mode: "collapse",
+		m: [1, 0, 0, 0],
+		vectors: [
+			[1, 1],
+			[1, 3]
+		]
+	},
+	{
+		key: "collapse-x-more",
+		mode: "collapse",
+		m: [1, 0, 0, 0],
+		vectors: [
+			[-2, 1],
+			[-2, -2],
+			[-2, 3]
+		]
+	},
+	{
+		key: "collapse-y",
+		mode: "collapse",
+		m: [0, 0, 0, 1],
+		label: [0.2, 0.6],
+		vectors: [
+			[3, 2],
+			[1, 2],
+			[-2, 2]
+		]
+	},
+	{
+		key: "collapse-diagonal",
+		mode: "collapse",
+		m: [0.5, 0.5, 0.5, 0.5],
+		label: [0.3, 0.75],
+		vectors: [
+			[2, 0],
+			[0, 2],
+			[3, -1]
+		]
+	},
+	{
+		key: "reverse",
+		mode: "question",
+		m: [1, 0, 0, 0],
+		vectors: [
+			[1, 1],
+			[1, 3]
+		]
+	},
+	{
+		key: "fiber",
+		mode: "hold",
+		m: [1, 0, 0, 0],
+		vectors: [
+			[1, 1],
+			[1, 3]
+		],
+		more: [
+			[1, 2],
+			[1, -1],
+			[1, -2]
+		],
+		fiber: [
+			[1, -3.5],
+			[1, 3.5]
+		]
+	},
+	{
+		key: "stretch",
+		mode: "roundTrip",
+		m: [2, 0, 0, 1],
+		vectors: [
+			[1, 1],
+			[1, 3]
+		]
+	},
+	{
+		key: "reflect",
+		mode: "roundTrip",
+		m: [1, 0, 0, -1],
+		vectors: [
+			[1, 1],
+			[1, 3]
+		]
+	}
+];
+// One colour per tracked vector, by position in `vectors`: the input-vector
+// cyan, then dracula yellow and orange. The further candidates in `more`
+// share a neutral, as does everything the vectors have in common (where
+// they land, the line they started on).
+export const invColors = [colorVector, colorHighlight, colorZ];
+export const invColorShared = colorToHex(colorNc);
+// The single vector that several different ones have collapsed into
+// (dracula red)
+export const invColorResult = colorAreaNeg;
+// Most vectors any one beat tracks (vectors + more)
+export const invPoolSize = 5;
+
 function colorToHex(color) {
 	return d3Color(color).formatHex();
 }

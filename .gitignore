@@ -5,3 +5,9 @@ node_modules
 build
 functions
 .env
+
+# Assignment context and report working files
+CLAUDE.md
+SPEC.md
+report.md
+.claude/

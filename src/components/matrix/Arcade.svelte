@@ -34,8 +34,11 @@
     show2d
 	} from "$stores";
 	import Vector from "./Vector.svelte";
+	import DetVolume from "./DetVolume.svelte";
+	import { det3dPresets } from "$data/determinant3d.js";
+	import { interpolateDet3d, matrix3dTo4 } from "$utils/determinant3d.js";
 	import { ScrollTrigger, gsap } from "$utils/gsap.js";
-	import { onMount } from "svelte";
+	import { onMount, onDestroy } from "svelte";
 	import {
 		sceneMounted,
 		titleMounted,
@@ -63,8 +66,33 @@
 		egEndMatrix,
 		initMatrix,
 		colorGrid,
-		colorGridAlt
+		colorGridAlt,
+		colorArea,
+		colorAreaNeg,
+		colorAreaZero,
+		colorHighlight,
+		tryBeats,
+		detPresets,
+		invBeats,
+		invColors,
+		invColorShared,
+		invColorResult,
+		invPoolSize
 	} from "$data/variables";
+	import {
+		detValue,
+		detMatrixEntries,
+		highlightedBasis,
+		detPresetRequest,
+		invNarrative,
+		invPair,
+		det3dActive,
+		det3dMatrix,
+		det3dPresetRequest
+	} from "$stores";
+	import { iHat, jHat } from "$data/tex";
+	import katex from "katex";
+	import { HTML } from "@threlte/extras";
 	import colors from "tailwindcss/colors";
 	import CameraControls from "camera-controls";
 	import {
@@ -163,6 +191,52 @@
 		matrix = matrix;
 	}
 
+	// Determinant chapter state
+	// While `detNarrative` is true, the displayed transform follows `detMatrix`
+	// (driven by the det chapter's scroll timelines and preset clicks) instead
+	// of the playground/narrative `matrix`.
+	let detNarrative = false;
+	let detMatrix = [...initMatrix];
+	let squareProps = { opacity: 0 };
+	let volumeProps = { opacity: 0 };
+	let volumeTween;
+	onDestroy(() => volumeTween?.kill());
+	let volumePreset = det3dPresets[0];
+	const volumeMotion = { progress: 0 };
+	$: playVolumePreset($det3dPresetRequest);
+	function playVolumePreset(request) {
+		if (!request || !$det3dActive) return;
+		const next = det3dPresets.find((preset) => preset.key === request.key);
+		if (!next) return;
+		volumeTween?.kill();
+		const previous = volumePreset;
+		// Retrace the current example to identity before playing the next.
+		// This also handles a new click partway through either animation.
+		volumeTween = gsap
+			.timeline()
+			.to(volumeMotion, {
+				progress: 0,
+				duration: volumeMotion.progress > 0 ? 0.3 : 0,
+				ease: "power2.inOut",
+				onUpdate: () =>
+					($det3dMatrix = interpolateDet3d(previous, volumeMotion.progress))
+			})
+			.call(() => (volumePreset = next))
+			.to(volumeMotion, {
+				progress: 1,
+				duration: next.key === "identity" ? 0 : 1.5,
+				ease: "power2.inOut",
+				onUpdate: () =>
+					($det3dMatrix = interpolateDet3d(next, volumeMotion.progress))
+			});
+	}
+	let cachedPlaygroundMatrix = null;
+
+	// 2x2 row-major [a, b, c, d] -> flat 4x4
+	function detTo([a, b, c, d]) {
+		return [a, b, 0, 0, c, d, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+	}
+
 	// Use different states during interaction and during narrative
 	const matrixTransform = spring(initMatrix);
 	$: {
@@ -170,9 +244,231 @@
 			$matrixTransform = $heroMatrix;
 			// } else if (!$showPlayground) {
 			// 	$matrixTransform = $customMatrix;
+		} else if ($det3dActive) {
+			// The preset animation already eases the cube's matrix. A second spring would
+			// distort a rotation and desynchronize its determinant and geometry.
+			matrixTransform.set(matrix3dTo4($det3dMatrix), { hard: true });
+		} else if (detNarrative) {
+			$matrixTransform = detMatrix;
+		} else if (tryDriving) {
+			const precise = [...matrix];
+			tryIdx.forEach((idx, k) => {
+				precise[idx] += (tryEntries[k] - $endMatrix[idx]) * $playhead;
+			});
+			$matrixTransform = precise;
 		} else {
 			$matrixTransform = matrix;
 		}
+	}
+
+	// Self-heal: the transform spring can diverge after long frame stalls
+	// (background tab, heavy jank); snap it back to its target if it blows up
+	$: if ($matrixTransform.some((v) => !isFinite(v) || Math.abs(v) > 100)) {
+		matrixTransform.set(
+			detNarrative ? [...detMatrix] : $showHero ? [...$heroMatrix] : [...matrix],
+			{ hard: true }
+		);
+	}
+
+	// Live determinant of the displayed 2x2 transform (signed area)
+	$: detVal =
+		$matrixTransform[0] * $matrixTransform[5] -
+		$matrixTransform[1] * $matrixTransform[4];
+	$: $detValue = detVal;
+	$: $detMatrixEntries = [
+		$matrixTransform[0],
+		$matrixTransform[1],
+		$matrixTransform[4],
+		$matrixTransform[5]
+	];
+	$: squareColor =
+		detVal > 0.02 ? colorArea : detVal < -0.02 ? colorAreaNeg : colorAreaZero;
+
+	// Place a basis-vector label just beyond the vector's tip
+	function basisLabelPos(x, y) {
+		const len = Math.hypot(x, y);
+		const s = len > 0.05 ? (len + 0.4) / len : 1;
+		return [x * s, y * s, 0.01];
+	}
+
+	// The Threlte HTML wrapper swallows pointer events over the canvas
+	function noPointer(node) {
+		if (node.parentElement) node.parentElement.style.pointerEvents = "none";
+	}
+
+	// "The determinant and invertibility" (st-inv-N beats): a few vectors followed
+	// through the transformation, one per slot of a fixed pool.
+	// - image: the vector itself, carried along by the matrix
+	// - ghost: a faded copy left at its starting point, with a dashed path
+	//   to where the vector is now
+	// - mark: a "?" on the ghost (a candidate for where the vector came from)
+	const invPool = Array.from({ length: invPoolSize }, (_, i) => i);
+	const unitPair = [
+		[1, 0],
+		[0, 1]
+	];
+	const invBlank = () => invPool.map(() => 0);
+	let track = {
+		starts: invPool.map(() => [0, 0]),
+		colors: invPool.map((n) => invColors[n] ?? invColorShared),
+		// The vector itself, as opposed to its faded starting copy: it turns
+		// red as it lands on the same point as the others
+		imageColors: invPool.map((n) => invColors[n] ?? invColorShared),
+		image: invBlank(),
+		ghost: invBlank(),
+		mark: invBlank(),
+		// Line of every starting point that shares the landing point
+		fiber: 0,
+		fiberCoords: [0, 0, 0, 0, 0, 0],
+		// Coordinates of the landing point, and the "Reverse?" beside them
+		landing: 0,
+		label: [0.2, -0.45],
+		question: 0,
+		// Once a beat follows its own vectors, î, ĵ and the unit square step
+		// aside (basis) and the shaded area is the one spanned by two of the
+		// tracked vectors (area, areaPair)
+		basis: 1,
+		basisLabel: 1,
+		area: 0,
+		areaPair: unitPair
+	};
+	function clearTrack() {
+		track.image = invBlank();
+		track.ghost = invBlank();
+		track.mark = invBlank();
+		track.fiber = 0;
+		track.landing = 0;
+		track.question = 0;
+		track.basis = 1;
+		track.basisLabel = 1;
+		track.area = 0;
+		$invPair = null;
+	}
+	// The shaded area as a matrix applied to the unit square: î and ĵ, or
+	// the two tracked vectors, as columns
+	$: [[spanX1, spanY1], [spanX2, spanY2]] =
+		track.basis < 0.5 ? track.areaPair : unitPair;
+	$: areaMatrix = [
+		spanX1, spanX2, 0, 0,
+		spanY1, spanY2, 0, 0,
+		0, 0, 1, 0,
+		0, 0, 0, 1
+	];
+	// Where each tracked vector is right now
+	$: trackImages = track.starts.map(([x, y]) => [
+		$matrixTransform[0] * x + $matrixTransform[1] * y,
+		$matrixTransform[4] * x + $matrixTransform[5] * y
+	]);
+	function trackCoord(v) {
+		return String(Math.round(v * 10) / 10 + 0);
+	}
+	// Restores the section's last beat when scrolling back up from 3D
+	let invRestore = () => {};
+
+	// î and ĵ can land on the same spot (a collapse onto a slanted line);
+	// their labels then step apart, to either side of the line
+	$: basisTipsMeet =
+		Math.hypot($matrixTransform[0], $matrixTransform[4]) > 0.05 &&
+		Math.hypot(
+			$matrixTransform[0] - $matrixTransform[1],
+			$matrixTransform[4] - $matrixTransform[5]
+		) < 0.3;
+	function basisLabelAside(x, y, side) {
+		const len = Math.hypot(x, y);
+		return [x + (y / len) * 0.4 * side, y - (x / len) * 0.4 * side, 0.01];
+	}
+
+	// "Try it out" walk-through state (st-try-N beats)
+	// `tryNarrative` is true while the 2D playground owns the matrix, i.e.
+	// from st-8 until the determinant chapter takes over. The beats tween
+	// `tryEntries` ([a, b, c, d]) and copy it into `$endMatrix`, so the
+	// matrix input and the scrubber stay in sync with the scroll.
+	let tryNarrative = false;
+	const tryEntries = [1, 0, 0, 1];
+	const tryAngle = { t: 0 };
+	// Playground matrix when the reader enters the first beat
+	let tryStart = [1, 0, 0, 1];
+
+	// The matrix input rounds every entry of `$endMatrix` to its 0.1 step and
+	// writes it back, which would make a scrubbed beat move in visible jumps.
+	// While the stored matrix is just the rounded walk-through matrix, the
+	// display adds the rounding error back; a reader's own edit moves an
+	// entry further than that, and the display follows `matrix` as usual.
+	const tryIdx = [0, 1, 4, 5];
+	$: tryDriving =
+		tryNarrative &&
+		tryIdx.every((idx, k) => Math.abs($endMatrix[idx] - tryEntries[k]) < 0.051);
+
+	// In the playground the wheel zooms the canvas, and camera-controls
+	// swallows the event, so the page stops scrolling. Two cases where the
+	// wheel has to keep scrolling the page instead:
+	// - a scroll gesture that is already moving the page when the canvas
+	//   under the cursor becomes interactive (it would zoom all the way out)
+	// - the whole walk-through, where scrolling is what plays the beats
+	let tryWheelLock = false;
+	let lastPageScroll = 0;
+
+	function onPageScroll() {
+		lastPageScroll = performance.now();
+	}
+	function onCanvasWheel(e) {
+		if (tryWheelLock || performance.now() - lastPageScroll < 250) {
+			// Never reaches camera-controls, so the default scroll goes ahead
+			e.stopPropagation();
+		}
+	}
+
+	function applyTryEntries() {
+		if (!tryNarrative) return;
+
+		const m = $endMatrix;
+		[m[0], m[1], m[4], m[5]] = tryEntries;
+		$endMatrix = m;
+	}
+	function applyTryAngle() {
+		const cos = Math.cos(tryAngle.t);
+		const sin = Math.sin(tryAngle.t);
+		tryEntries[0] = cos;
+		tryEntries[1] = -sin;
+		tryEntries[2] = sin;
+		tryEntries[3] = cos;
+
+		applyTryEntries();
+	}
+
+	// Preset clicked in the article's "Select transformation" list
+	let detPresetTween;
+	$: onDetPresetRequest($detPresetRequest);
+	function onDetPresetRequest(request) {
+		if (!request || !detNarrative) return;
+
+		if (detPresetTween) detPresetTween.kill();
+
+		// "Apply transformation" on the reader's own matrix: start over from
+		// the untouched unit square, then play the transformation
+		if (request.replay) {
+			detPresetTween = gsap
+				.timeline()
+				.to(detMatrix, {
+					endArray: [...initMatrix],
+					duration,
+					onUpdate: () => (detMatrix = detMatrix)
+				})
+				.to(detMatrix, {
+					endArray: detTo(request.m),
+					duration: 1.5,
+					ease: "power2.inOut",
+					onUpdate: () => (detMatrix = detMatrix)
+				});
+			return;
+		}
+
+		detPresetTween = gsap.to(detMatrix, {
+			endArray: detTo(request.m),
+			duration: 1.5,
+			ease: "power2.inOut",
+			onUpdate: () => (detMatrix = detMatrix)
+		});
 	}
 
 	// Update transformed view
@@ -558,6 +854,7 @@
 		basisAltProps.xVisible = true;
 		basisAltProps.yVisible = true;
 		basisAltProps.zVisible = true;
+		squareProps.opacity = 1;
 	}
 
 	// $: basisAltProps.zVisible = $show3d;
@@ -1334,6 +1631,7 @@
 					start: "top center",
 					onEnter: () => {
 						$showPlayground = true;
+						tryNarrative = true;
 
 						$inputVectorToggled = true;
 					},
@@ -1341,6 +1639,7 @@
 						// When going back from playground to interactive
 
 						$showPlayground = false;
+						tryNarrative = false;
 
 						$cameraControls.reset(true);
 
@@ -1461,6 +1760,644 @@
 			);
 		// Show example vector
 
+		// Guided walk-through of the 2D playground (st-try-1..5): scrolling
+		// scrubs the playground matrix through one type of transformation per
+		// beat. Every beat first returns to the identity and then applies its
+		// own matrix, so each type is seen against the untransformed grid.
+		const identity2d = [1, 0, 0, 1];
+		const turn = ({ m }) => Math.atan2(m[2], m[0]);
+
+		tryBeats.forEach((beat, i) => {
+			const prev = tryBeats[i - 1];
+
+			const tl = gsap.timeline({
+				...timelineProps,
+				scrollTrigger: {
+					...stProps,
+					trigger: `#st-try-${i + 1}`,
+					end: `+=${scrollUnit * 1}`,
+					// Start values are fixed (or re-read in onEnter below);
+					// a refresh must not replay a beat over the reader's matrix
+					invalidateOnRefresh: false,
+					onEnter: (self) => {
+						stProps.onEnter();
+
+						// Show the end state, wherever the playhead was left
+						$matrixTween.progress(1);
+
+						if (i === 0) {
+							// Frame the walk-through with the default view, however
+							// the reader left the camera in the playground
+							tryWheelLock = true;
+							$cameraControls.reset(true);
+
+							// Start from whatever the reader left in the playground
+							tryStart = [
+								$endMatrix[0],
+								$endMatrix[1],
+								$endMatrix[4],
+								$endMatrix[5]
+							];
+							self.animation.invalidate();
+						}
+					},
+					onEnterBack: () => {
+						stProps.onEnterBack();
+
+						$matrixTween.progress(1);
+					},
+					onLeaveBack: () => {
+						stProps.onLeaveBack();
+
+						// Back in the free playground: the wheel zooms again
+						if (i === 0) tryWheelLock = false;
+					}
+				}
+			});
+
+			// Back to the identity
+			if (prev?.rotate) {
+				tl.fromTo(
+					tryAngle,
+					{ t: turn(prev) },
+					{
+						t: 0,
+						duration: 0.25,
+						immediateRender: false,
+						onUpdate: applyTryAngle
+					}
+				);
+			} else {
+				tl.fromTo(
+					tryEntries,
+					{ endArray: prev ? prev.m : () => tryStart },
+					{
+						endArray: identity2d,
+						duration: 0.25,
+						immediateRender: false,
+						onUpdate: applyTryEntries
+					}
+				);
+			}
+
+			// Apply this beat's transformation
+			if (beat.rotate) {
+				tl.fromTo(
+					tryAngle,
+					{ t: 0 },
+					{
+						t: turn(beat),
+						immediateRender: false,
+						onUpdate: applyTryAngle
+					}
+				);
+			} else {
+				tl.fromTo(
+					tryEntries,
+					{ endArray: identity2d },
+					{
+						endArray: beat.m,
+						immediateRender: false,
+						onUpdate: applyTryEntries
+					}
+				);
+			}
+
+			tl.to({}, { duration: delay });
+		});
+
+		// === Determinant chapter ===
+		// Bridge: leave the 2D playground, enter determinant mode
+		gsap
+			.timeline({
+				scrollTrigger: {
+					...stPropsAlt,
+					trigger: "#section-det",
+					start: "top center",
+					onEnter: () => {
+						// Snapshot the playground matrix so scrolling back restores it
+						cachedPlaygroundMatrix = [...$endMatrix];
+
+						$showPlayground = false;
+						tryNarrative = false;
+						$cameraControls.reset(true);
+
+						$dataToggled = undefined;
+						$gridToggled = true;
+						$transformedGridToggled = true;
+						$inputVectorToggled = false;
+
+						$matrixTween.progress(1);
+						gsap.to($endMatrix, {
+							endArray: initMatrix,
+							onUpdate: () => {
+								$endMatrix = $endMatrix;
+							},
+							duration
+						});
+
+						basisAltProps.vectorVisible = false;
+
+						// Enter determinant mode from the current visual state,
+						// so the canvas transitions in place with no reset
+						detMatrix.forEach((_, i) => (detMatrix[i] = $matrixTransform[i]));
+						detMatrix = detMatrix;
+						detNarrative = true;
+
+						// Then ease back to the identity, so the chapter opens with
+						// both basis vectors drawn from the origin (the walk-through
+						// ends on Flatten, where ĵ has no length)
+						if (detPresetTween) detPresetTween.kill();
+						detPresetTween = gsap.to(detMatrix, {
+							endArray: [...initMatrix],
+							duration,
+							onUpdate: () => (detMatrix = detMatrix)
+						});
+					},
+					onLeaveBack: () => {
+						detNarrative = false;
+
+						$showPlayground = true;
+						tryNarrative = true;
+						$inputVectorToggled = true;
+						basisAltProps.vectorVisible = true;
+
+						if (cachedPlaygroundMatrix) {
+							gsap.to($endMatrix, {
+								endArray: cachedPlaygroundMatrix,
+								onUpdate: () => {
+									$endMatrix = $endMatrix;
+								},
+								duration
+							});
+						}
+					}
+				}
+			})
+			.add("step-1")
+			.to(
+				"#canvas-wrapper",
+				{
+					pointerEvents: "none",
+					duration
+				},
+				"step-1"
+			)
+			.to(
+				"#inputs",
+				{
+					autoAlpha: 0,
+					x: -40,
+					duration
+				},
+				"step-1"
+			);
+
+		// Shade the unit square at the identity; show the det readout
+		gsap
+			.timeline({
+				...timelineProps,
+				scrollTrigger: {
+					...stProps,
+					trigger: "#st-det-1",
+					end: `+=${scrollUnit * 1}`
+				}
+			})
+			.add("step-1")
+			.to(
+				detMatrix,
+				{
+					endArray: [...initMatrix],
+					onUpdate: () => (detMatrix = detMatrix)
+				},
+				"step-1"
+			)
+			.to(
+				squareProps,
+				{
+					opacity: 1,
+					onUpdate: () => (squareProps = squareProps)
+				},
+				"step-1"
+			)
+			.to("#det-readout", { autoAlpha: 1 }, "step-1")
+			.to({}, { duration: delay });
+
+		// The preset walk-through (st-det-2..6): scrolling through a beat
+		// first returns the square to the identity, then plays that beat's
+		// transformation, so each one starts from the untouched unit square.
+		// From the identity, Reflect passes visibly through det = 0.
+		const detBeats = [
+			"stretch",
+			"compress",
+			"shear",
+			"rotate",
+			"reflect"
+		].map((key) => detPresets.find((preset) => preset.key === key));
+		const identity2x2 = [1, 0, 0, 1];
+		// Rotate turns through the angle instead of blending the entries, so
+		// the square keeps its area (det = 1) all the way round
+		const blend = (preset, k) => {
+			if (preset.key === "rotate") {
+				const t = Math.atan2(preset.m[2], preset.m[0]) * k;
+				return [Math.cos(t), -Math.sin(t), Math.sin(t), Math.cos(t)];
+			}
+			return preset.m.map((v, n) => identity2x2[n] + (v - identity2x2[n]) * k);
+		};
+		// Scrubbed timelines lag behind the scroll, so on a fast scroll
+		// several beats are still moving at once. Only the beat the reader
+		// entered last writes the square, and it writes the whole matrix.
+		let detBeatOwner = null;
+
+		detBeats.forEach((beat, i) => {
+			const prev = detBeats[i - 1];
+			// undo: 0 -> 1 takes the previous beat back to the identity
+			// apply: 0 -> 1 plays this beat from the identity
+			const state = { undo: 0, apply: 0 };
+
+			const write = () => {
+				if (detBeatOwner !== i) return;
+
+				const m =
+					state.apply > 0 || !prev
+						? blend(beat, state.apply)
+						: blend(prev, 1 - state.undo);
+				[detMatrix[0], detMatrix[1], detMatrix[4], detMatrix[5]] = m;
+				detMatrix = detMatrix;
+			};
+			const own = () => {
+				detBeatOwner = i;
+				// Scrolling now owns the square
+				if (detPresetTween) detPresetTween.kill();
+				// Entering at a point where the timeline is holding still
+				// (scrolling back up from the section below) renders nothing
+				// by itself
+				write();
+			};
+
+			gsap
+				.timeline({
+					...timelineProps,
+					scrollTrigger: {
+						...stProps,
+						trigger: `#st-det-${i + 2}`,
+						end: `+=${scrollUnit * 1}`,
+						onEnter: () => {
+							stProps.onEnter();
+							own();
+						},
+						onEnterBack: () => {
+							stProps.onEnterBack();
+							own();
+						}
+					}
+				})
+				.fromTo(
+					state,
+					{ undo: 0 },
+					{ undo: 1, duration: 0.25, immediateRender: false, onUpdate: write }
+				)
+				.fromTo(
+					state,
+					{ apply: 0 },
+					{ apply: 1, immediateRender: false, onUpdate: write }
+				)
+				.to({}, { duration: delay });
+		});
+
+		// === The determinant and invertibility (st-inv-1..8) ===
+		// Bridge: the reader arrives from "Try it" with their own matrix
+		// applied; hand the canvas back to the scroll, from the identity.
+		// Only once the "Try it" block has all but left the screen — while
+		// any of it is still readable, its matrix has to stay editable.
+		let invBeatOwner = null;
+
+		gsap.timeline({
+			scrollTrigger: {
+				...stPropsAlt,
+				trigger: "#det-try",
+				start: "bottom 10%",
+				onEnter: () => {
+					$invNarrative = true;
+					detBeatOwner = null;
+					invBeatOwner = null;
+
+					if (detPresetTween) detPresetTween.kill();
+					// A slow return, so the reader sees their own square
+					// settle back before the vectors change
+					detPresetTween = gsap.to(detMatrix, {
+						endArray: [...initMatrix],
+						duration: 0.9,
+						ease: "power2.inOut",
+						onUpdate: () => (detMatrix = detMatrix)
+					});
+				},
+				onLeaveBack: () => {
+					$invNarrative = false;
+					invBeatOwner = null;
+
+					clearTrack();
+					track = track;
+				}
+			}
+		});
+
+		const clamp01 = (v) => Math.min(1, Math.max(0, v));
+		// Every vector a beat follows, and how far its matrix is still
+		// applied once the beat has finished
+		const invVectors = (beat) => [...beat.vectors, ...(beat.more ?? [])];
+		const invEndK = (beat) => (beat.mode === "roundTrip" ? 0 : 1);
+		const sameVectors = (a, b) =>
+			a.length === b.length &&
+			a.every((v, n) => v[0] === b[n][0] && v[1] === b[n][1]);
+		// The two vectors of each beat that span its shaded area
+		const invPairs = invBeats.map((beat) => beat.vectors.slice(0, 2));
+		const basisColors = [colorX, colorY];
+		const mixHex = (from, to, t) =>
+			"#" +
+			[1, 3, 5]
+				.map((at) => {
+					const a = parseInt(from.slice(at, at + 2), 16);
+					const b = parseInt(to.slice(at, at + 2), 16);
+					return Math.round(a + (b - a) * t)
+						.toString(16)
+						.padStart(2, "0");
+				})
+				.join("");
+
+		invBeats.forEach((beat, i) => {
+			const prev = invBeats[i - 1];
+			const hold = beat.mode === "hold";
+			const keepsVectors =
+				prev && sameVectors(invVectors(prev), invVectors(beat));
+			// undo: 0 -> 1 takes the previous beat back to the identity
+			// apply: 0 -> 1 plays this beat from the identity
+			// back: 0 -> 1 plays it backwards again (roundTrip)
+			// q1..q3: the starting points vanish, then return one at a time
+			// extra: further candidates, and the line they all sit on
+			const state = {
+				undo: 0,
+				apply: 0,
+				back: 0,
+				q1: 0,
+				q2: 0,
+				q3: 0,
+				extra: 0
+			};
+
+			const write = () => {
+				if (invBeatOwner !== i) return;
+
+				// Still showing the previous beat, on its way back
+				const undoing = !hold && prev && state.apply === 0;
+				const shown = undoing ? prev : beat;
+				const vectors = invVectors(shown);
+				const collapses = shown.mode !== "roundTrip";
+
+				// The first beat grows out of the unit square: before its
+				// matrix plays, î and ĵ glide over to its two vectors
+				// (morph 0 -> 1), taking the shaded area along
+				const morph = i === 0 ? state.undo : 1;
+
+				// k: how far the matrix is applied; fade: the vectors
+				// themselves, which swap while the grid is at the identity
+				let k, fade;
+				if (undoing) {
+					k = invEndK(prev) * (1 - state.undo);
+					fade = keepsVectors ? 1 : clamp01((1 - state.undo) / 0.2);
+				} else if (hold) {
+					k = 1;
+					fade = 1;
+				} else {
+					k = clamp01((state.apply - 0.15) / 0.85) * (1 - state.back);
+					fade = keepsVectors ? 1 : clamp01(state.apply / 0.15);
+				}
+				if (i === 0) fade = morph > 0 ? 1 : 0;
+
+				// What the finished previous beat had on screen fades with it
+				const left = undoing ? clamp01(1 - state.undo * 2) : 1;
+				const asked = undoing
+					? prev.mode === "question" || prev.mode === "hold"
+					: beat.mode === "question" || hold;
+				const settled = undoing || hold;
+
+				vectors.forEach((v, n) => {
+					const added = n >= shown.vectors.length;
+					const path = clamp01(k * 4);
+
+					const gliding = morph < 1 && n < 2;
+					track.starts[n] = gliding
+						? unitPair[n].map((c, axis) => c + (v[axis] - c) * morph)
+						: v;
+					track.colors[n] = added
+						? invColorShared
+						: gliding
+						? mixHex(basisColors[n], invColors[n], morph)
+						: invColors[n];
+					track.image[n] = fade * (added && hold ? state.extra : 1);
+
+					if (!asked) {
+						track.ghost[n] = path;
+						track.mark[n] = 0;
+					} else if (added) {
+						track.ghost[n] = track.mark[n] = hold ? state.extra : left;
+					} else if (settled) {
+						track.ghost[n] = path;
+						track.mark[n] = left;
+					} else {
+						const back = n === 0 ? state.q2 : state.q3;
+						track.ghost[n] = path * (1 - state.q1) + back;
+						track.mark[n] = back;
+					}
+				});
+				for (let n = vectors.length; n < invPoolSize; n++) {
+					track.image[n] = track.ghost[n] = track.mark[n] = 0;
+				}
+
+				// Different vectors that have collapsed into one: the one
+				// they became is red, wherever each of them started
+				track.landing = collapses ? clamp01((k - 0.8) / 0.2) : 0;
+				vectors.forEach((_, n) => {
+					track.imageColors[n] = mixHex(
+						track.colors[n],
+						invColorResult,
+						track.landing
+					);
+				});
+
+				// î and ĵ themselves are swapped for the gliding copies as
+				// soon as those start to move; their labels fade more slowly
+				track.basis = i === 0 ? 1 - fade : 0;
+				track.basisLabel = i === 0 ? 1 - clamp01(morph / 0.35) : 0;
+				track.area = fade;
+				track.areaPair =
+					morph < 1
+						? [track.starts[0], track.starts[1]]
+						: invPairs[undoing ? i - 1 : i];
+				$invPair =
+					track.basis < 0.5
+						? {
+								vectors: track.areaPair,
+								colors: [track.colors[0], track.colors[1]],
+								resultColors: [track.imageColors[0], track.imageColors[1]],
+								labels: track.basisLabel
+						  }
+						: null;
+
+				track.label = shown.label ?? [0.2, -0.45];
+				track.question = !asked ? 0 : settled ? left : state.q1;
+
+				track.fiber = shown.fiber ? (hold ? state.extra : left) : 0;
+				if (shown.fiber) {
+					const [[x1, y1], [x2, y2]] = shown.fiber;
+					track.fiberCoords = [x1, y1, 0, x2, y2, 0];
+				}
+				track = track;
+
+				[detMatrix[0], detMatrix[1], detMatrix[4], detMatrix[5]] = blend(
+					shown,
+					k
+				);
+				detMatrix = detMatrix;
+			};
+			const own = () => {
+				invBeatOwner = i;
+				if (detPresetTween) detPresetTween.kill();
+				write();
+			};
+			if (i === invBeats.length - 1) invRestore = own;
+
+			const tween = (key, vars = {}) => [
+				state,
+				{ [key]: 0 },
+				{ [key]: 1, immediateRender: false, onUpdate: write, ...vars }
+			];
+			const timeline = gsap.timeline({
+				...timelineProps,
+				scrollTrigger: {
+					...stProps,
+					trigger: `#st-inv-${i + 1}`,
+					end: `+=${
+						scrollUnit *
+						(i > 0 && (hold || beat.mode === "collapse") ? 1 : 1.5)
+					}`,
+					onEnter: () => {
+						stProps.onEnter();
+						own();
+					},
+					onEnterBack: () => {
+						stProps.onEnterBack();
+						own();
+					}
+				}
+			});
+
+			if (hold) {
+				timeline.fromTo(...tween("extra"));
+			} else {
+				timeline
+					.fromTo(
+						...tween(
+							"undo",
+							// The first beat's glide from î and ĵ takes its time
+							i === 0
+								? { duration: 0.5, ease: "power1.inOut" }
+								: { duration: 0.25 }
+						)
+					)
+					.fromTo(...tween("apply"));
+			}
+			if (beat.mode === "question") {
+				timeline
+					.fromTo(...tween("q1", { duration: 0.25 }))
+					.to({}, { duration: delay })
+					.fromTo(...tween("q2", { duration: 0.25 }))
+					.fromTo(...tween("q3", { duration: 0.25 }));
+			}
+			if (beat.mode === "roundTrip") {
+				timeline.to({}, { duration: delay * 2 }).fromTo(...tween("back"));
+			}
+			timeline.to({}, { duration: delay });
+		});
+
+		// Brief 3D determinant extension, in the existing scene and camera.
+		function enterVolume(reset = false) {
+			if (detPresetTween) detPresetTween.kill();
+			detBeatOwner = invBeatOwner = null;
+			$invNarrative = false;
+			clearTrack();
+			track = track;
+			detNarrative = true;
+			if (reset) {
+				volumeTween?.kill();
+				volumePreset = det3dPresets[0];
+				volumeMotion.progress = 0;
+				$det3dMatrix = [...volumePreset.matrix];
+				$det3dPresetRequest = null;
+			}
+			$det3dActive = true;
+			$showPlayground = false;
+			$show3d = true;
+			$show2d = false;
+			$cameraAutoRotate = false;
+			$grid3dToggled = true;
+			$transformedGridToggled = true;
+			gsap.to(squareProps, {
+				opacity: 0,
+				duration: 0.6,
+				overwrite: true,
+				onUpdate: () => (squareProps = squareProps)
+			});
+			gsap.to(volumeProps, {
+				opacity: 1,
+				duration: 0.9,
+				overwrite: true,
+				onUpdate: () => (volumeProps = volumeProps)
+			});
+			gsap.to($cameraControls, {
+				distance: 9,
+				polarAngle: Math.PI * 0.35,
+				azimuthAngle: Math.PI * 0.3,
+				duration: 0.9,
+				ease: "power2.inOut",
+				overwrite: "auto"
+			});
+			gsap.to("#det-readout", { autoAlpha: 1, duration: 0.3, overwrite: true });
+		}
+		function leaveVolume() {
+			$det3dActive = false;
+			volumeTween?.kill();
+			$show3d = false;
+			$show2d = true;
+			$grid3dToggled = false;
+			gsap.to(volumeProps, {
+				opacity: 0,
+				duration: 0.3,
+				overwrite: true,
+				onUpdate: () => (volumeProps = volumeProps)
+			});
+			gsap.killTweensOf($cameraControls);
+			$cameraControls.reset(true);
+		}
+		ScrollTrigger.create({
+			...stPropsAlt,
+			trigger: "#section-det3d",
+			start: "top center",
+			onEnter: () => enterVolume(true),
+			onLeaveBack: () => {
+				leaveVolume();
+				$invNarrative = true;
+				invRestore();
+				gsap.to(squareProps, {
+					opacity: 1,
+					duration: 0.6,
+					overwrite: true,
+					onUpdate: () => (squareProps = squareProps)
+				});
+			}
+		});
+
+
 		// Animate back
 		gsap
 			.timeline({
@@ -1472,8 +2409,22 @@
 					// onToggle: () => {
 					onEnter: () => {
 						// stProps.onEnter();
+						leaveVolume();
 
 						$showPlayground = false;
+
+						// Leave determinant mode; hide square and readout
+						detNarrative = false;
+						$invNarrative = false;
+						invBeatOwner = null;
+						clearTrack();
+						track = track;
+						gsap.to(squareProps, {
+							opacity: 0,
+							duration,
+							onUpdate: () => (squareProps = squareProps)
+						});
+						gsap.to("#det-readout", { autoAlpha: 0, duration });
 
 						// Return to default camera position
 						$cameraControls.reset(true);
@@ -1500,15 +2451,8 @@
 					onLeaveBack: () => {
 						// stProps.onLeaveBack();
 
-						$showPlayground = true;
-
-						// $vectorCoordsInput[0] = egVector[0];
-						// $vectorCoordsInput[1] = egVector[1];
-						// $vectorCoordsInput[2] = 0;
-
-						// $inputVectorToggled = false;
-						// onInputVectorToggle(false);
-						basisAltProps.vectorVisible = true;
+						// Restore the cube and its last matrix on upward scrolling.
+						enterVolume();
 
 						// $dataToggled = cachePlaygroundSettings.dataToggled;
 					}
@@ -1528,24 +2472,8 @@
 				},
 				"step-1"
 			)
-			// Disable inputs
-			.to(
-				"#canvas-wrapper",
-				{
-					pointerEvents: "none",
-					duration
-				},
-				"step-1"
-			)
-			.to(
-				"#inputs",
-				{
-					autoAlpha: 0,
-					x: -40,
-					duration
-				},
-				"step-1"
-			)
+			// (Hiding #inputs / disabling the canvas now happens at the
+			// determinant-chapter bridge, which sits before this section)
 			// Reset basis vectors
 			.to(
 				xCoords,
@@ -2247,6 +3175,20 @@
 
 	onMount(() => {
 		mounted = true;
+
+		// Capture phase on the wrapper runs before camera-controls' own
+		// listener on the canvas
+		const wrapper = document.querySelector("#canvas-wrapper");
+		window.addEventListener("scroll", onPageScroll, { passive: true });
+		wrapper.addEventListener("wheel", onCanvasWheel, {
+			capture: true,
+			passive: true
+		});
+
+		return () => {
+			window.removeEventListener("scroll", onPageScroll);
+			wrapper.removeEventListener("wheel", onCanvasWheel, { capture: true });
+		};
 	});
 </script>
 
@@ -2269,7 +3211,7 @@
 	coords={vectorCoords}
 	color={colorVector}
 	texOpacity={props.vectorTexOpacity}
-	visible={props.xVisible}
+	visible={props.xVisible && !$det3dActive}
 	dim3={props.vectorDim3}
 />
 
@@ -2279,7 +3221,7 @@
 	coords={[0, 0, 0, ...$vectorCoordsSpring]}
 	color={colorVector}
 	tex={false}
-	visible={basisAltProps.vectorVisible}
+	visible={basisAltProps.vectorVisible && !$det3dActive}
 />
 
 <!-- Basis vectors -->
@@ -2291,7 +3233,7 @@
 	scalar={props.xScalar}
 	scalarOpacity={props.xScalarOpacity}
 	scalarAlign={props.xScalarAlign}
-	visible={props.xVisible}
+	visible={props.xVisible && !$det3dActive}
 	dim3={props.xDim3}
 />
 <Vector
@@ -2302,7 +3244,7 @@
 	scalar={props.yScalar}
 	scalarOpacity={props.yScalarOpacity}
 	scalarAlign={props.yScalarAlign}
-	visible={props.yVisible}
+	visible={props.yVisible && !$det3dActive}
 	dim3={props.yDim3}
 />
 <Vector
@@ -2313,7 +3255,7 @@
 	scalar={props.zScalar}
 	scalarOpacity={props.zScalarOpacity}
 	scalarAlign={props.zScalarAlign}
-	visible={props.zVisible}
+	visible={props.zVisible && !$det3dActive}
 	dim3={props.zDim3}
 />
 
@@ -2321,24 +3263,164 @@
 <Vector
 	view={transformedView}
 	coords={[0, 0, 0, 1, 0, 0]}
-	color={colorX}
+	color={$highlightedBasis === "x" ? colorHighlight : colorX}
 	tex={false}
-	visible={basisAltProps.xVisible}
+	visible={basisAltProps.xVisible && track.basis > 0.01 && !$det3dActive}
+	width={$highlightedBasis === "x" ? 4 : 3}
+	opacity={($highlightedBasis === "y" ? 0.25 : 1) * track.basis}
 />
 <Vector
 	view={transformedView}
 	coords={[0, 0, 0, 0, 1, 0]}
-	color={colorY}
+	color={$highlightedBasis === "y" ? colorHighlight : colorY}
 	tex={false}
-	visible={basisAltProps.yVisible}
+	visible={basisAltProps.yVisible && track.basis > 0.01 && !$det3dActive}
+	width={$highlightedBasis === "y" ? 4 : 3}
+	opacity={($highlightedBasis === "x" ? 0.25 : 1) * track.basis}
 />
 <Vector
 	view={transformedView}
 	coords={[0, 0, 0, 0, 0, 1]}
 	color={colorZ}
 	tex={false}
-	visible={basisAltProps.zVisible}
+	visible={basisAltProps.zVisible && !$det3dActive}
 />
+
+<DetVolume {view} matrix={$det3dMatrix} opacity={volumeProps.opacity} />
+
+<!-- Unit square -> parallelogram, shaded by determinant sign. The inner
+     group makes it the area spanned by two tracked vectors instead of by
+     î and ĵ ("The determinant and invertibility") -->
+<T.Group renderOrder={-1} matrix={$matrixTransform} matrixAutoUpdate={false}>
+	<T.Group matrix={areaMatrix} matrixAutoUpdate={false}>
+		<T.Mesh
+			position={[0.5, 0.5, 0.002]}
+			visible={squareProps.opacity > 0.001}
+		>
+			<T.PlaneGeometry args={[1, 1]} />
+			<T.MeshBasicMaterial
+				color={squareColor}
+				transparent
+				opacity={0.45 *
+					squareProps.opacity *
+					Math.max(track.basis, track.area)}
+				depthWrite={false}
+			>
+				<T.DoubleSide attach="side" />
+			</T.MeshBasicMaterial>
+		</T.Mesh>
+	</T.Group>
+</T.Group>
+
+<!-- Tracked vectors ("The determinant and invertibility"): each one rides the
+     transformation, leaving a faded copy and a dashed path behind -->
+{#each invPool as n}
+	{@const [x, y] = track.starts[n]}
+	<Vector
+		view={transformedView}
+		coords={[0, 0, 0, x, y, 0]}
+		color={track.imageColors[n]}
+		tex={false}
+		visible={track.image[n] > 0.01}
+		opacity={track.image[n]}
+	/>
+	<Vector
+		{view}
+		coords={[0, 0, 0, x, y, 0]}
+		color={track.colors[n]}
+		tex={false}
+		visible={track.ghost[n] > 0.01}
+		opacity={0.3 * track.ghost[n]}
+	/>
+	<Vector
+		{view}
+		coords={[x, y, 0, trackImages[n][0], trackImages[n][1], 0]}
+		color={track.colors[n]}
+		tex={false}
+		end={false}
+		stroke="dashed"
+		width={2}
+		visible={track.ghost[n] > 0.01}
+		opacity={0.6 * track.ghost[n]}
+	/>
+	{#if track.mark[n] > 0.01}
+		<HTML position={basisLabelPos(x, y)} center>
+			<span
+				use:noPointer
+				class="text-2xl"
+				style:color={track.colors[n]}
+				style:opacity={track.mark[n]}
+			>
+				?
+			</span>
+		</HTML>
+	{/if}
+{/each}
+<!-- Every starting point that lands where the tracked vectors did -->
+<Vector
+	{view}
+	coords={track.fiberCoords}
+	color={invColorShared}
+	tex={false}
+	end={false}
+	stroke="dashed"
+	width={2}
+	visible={track.fiber > 0.01}
+	opacity={0.6 * track.fiber}
+/>
+{#if track.landing > 0.01}
+	<HTML
+		position={[
+			trackImages[0][0] + track.label[0],
+			trackImages[0][1] + track.label[1],
+			0.01
+		]}
+	>
+		<span
+			use:noPointer
+			class="whitespace-nowrap text-xl"
+			style:color={invColorResult}
+			style:opacity={track.landing}
+		>
+			({trackCoord(trackImages[0][0])}, {trackCoord(trackImages[0][1])})
+			<span class="ml-2 italic" style:opacity={track.question}>Reverse?</span>
+		</span>
+	</HTML>
+{/if}
+
+<!-- î / ĵ labels riding the transformed basis vectors (determinant chapter) -->
+{#if squareProps.opacity > 0.01 && track.basisLabel > 0.01}
+	<HTML
+		position={basisTipsMeet
+			? basisLabelAside($matrixTransform[0], $matrixTransform[4], 1)
+			: basisLabelPos($matrixTransform[0], $matrixTransform[4])}
+		center
+	>
+		<span
+			use:noPointer
+			class="text-2xl"
+			style:color={colorX}
+			style:opacity={squareProps.opacity * track.basisLabel}
+		>
+			{@html katex.renderToString(iHat)}
+		</span>
+	</HTML>
+	<HTML
+		position={basisTipsMeet
+			? basisLabelAside($matrixTransform[1], $matrixTransform[5], -1)
+			: basisLabelPos($matrixTransform[1], $matrixTransform[5])}
+		center
+	>
+		<span
+			use:noPointer
+			class="text-2xl"
+			style:color={colorY}
+			style:opacity={squareProps.opacity * track.basisLabel}
+		>
+			{@html katex.renderToString(jHat)}
+		</span>
+	</HTML>
+{/if}
 
 <!-- FIXME: Change blending mode of grid? -->
 <T.Group renderOrder={-3}>

@@ -15,7 +15,10 @@ import {
 	eg3dMatrixX,
 	eg3dMatrixY,
 	eg3dMatrixZ,
-	eg3dOutputVector
+	eg3dOutputVector,
+	tryBeats,
+	invColors,
+	invColorResult
 } from "$data/variables.js";
 
 const colorA = colors.cyan["400"];
@@ -319,3 +322,42 @@ ${c14} \\
 ${c15}
 \end{array}\right]
 \end{aligned}`;
+
+// Determinant chapter
+export const iHat = String.raw`\hat{\imath}`;
+export const jHat = String.raw`\hat{\jmath}`;
+
+const aDet = colorTex("a", colorX);
+const cDet = colorTex("c", colorX);
+const bDet = colorTex("b", colorY);
+const dDet = colorTex("d", colorY);
+
+export const detFormula = String.raw`\det\begin{bmatrix}
+${aDet} & ${bDet} \\
+${cDet} & ${dDet}
+\end{bmatrix} = ${aDet}${dDet} - ${bDet}${cDet}`;
+
+// "Try it out" walk-through: the entry names, and identity -> each beat's
+// matrix, with columns in the basis-vector colors
+export const entryTex = { a: aDet, b: bDet, c: cDet, d: dDet };
+
+function matrix2dTex([a, b, c, d]) {
+	return String.raw`\begin{bmatrix}
+${colorTex(a, colorX)} & ${colorTex(b, colorY)} \\
+${colorTex(c, colorX)} & ${colorTex(d, colorY)}
+\end{bmatrix}`;
+}
+
+export const tryBeatTex = Object.fromEntries(
+	tryBeats.map(({ key, m }) => [
+		key,
+		String.raw`${matrix2dTex([1, 0, 0, 1])} \;\to\; ${matrix2dTex(m)}`
+	])
+);
+
+// "The determinant and invertibility": a tracked vector's coordinates in its own
+// colour (n is its position among the beat's vectors)
+export const invVectorTex = (n, coords) => colorTex(coords, invColors[n]);
+// ...and the point several of them collapse onto, in the resulting
+// vector's red
+export const invResultTex = (coords) => colorTex(coords, invColorResult);
